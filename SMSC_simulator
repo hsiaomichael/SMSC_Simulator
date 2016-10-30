@@ -1,0 +1,531 @@
+#!/usr/bin/python
+########################################################################################
+#
+# Filename:    SMSC_simulator
+#  
+# Description
+# ===========
+# Client Application , able encode/decode m3ua/sccp/tcap/map message
+# Current Status : support request from STP operation MO-FSM , SRI-SM-ack, MT-FSM-ack 
+#                  support response to STP operation MO-FSM-ack ,SRI-SM , MT-FSM
+#
+# TODO :
+# SMSC simulator : support request type MO-FSM , SRI-SM-ack, MT-FSM-ack , submit_sm
+#                  support response type MO-FSM-ack , SRI-SM , MT-FSM , submit_sm_resp
+#
+# FSG simulator  : support request SRI-SM , MT-FSM , deliver_sm_resp
+#                  support response SRI-SM-ack , MT-FSM-ack , deliver_sm
+
+# Author    : Michael Hsiao #
+# Date      : 2016/10/01
+# Desc      : Initial
+
+# Update    : Michael Hsiao #
+# Date      : 2016/10/18
+# Desc      : Act as SMSC
+
+########################################################################################
+import sys,time,os,socket,thread,Queue,random
+import random,string,struct
+import PCA_GenLib
+import PCA_DLL
+import PCA_ThreadLib
+import PCA_XMLParser
+import PCA_M3UAClientSocket
+import PCA_M3UAParser
+import PCA_M3UAMessage
+
+ResponseMutex = thread.allocate_lock()
+g_SocketBuffer = {}
+g_request_counter = 0
+g_response_counter = 0
+
+MSG_Queue = Queue.Queue()
+SRI_Queue = Queue.Queue()
+MT_Queue = Queue.Queue()
+MT_resp_Queue = Queue.Queue()
+
+
+			
+#########################################################################
+### RESPONSE
+#########################################################################
+
+def getDetailMessage(message,parameter_list,display_flags):
+  try:
+        Msg = "-----------------------------------------------------------------"
+        PCA_GenLib.WriteLog(Msg,2)
+        sccp_msg_dict = {}
+        for m3ua_key in sorted(message):
+           if m3ua_key == "M3UA sccp_msg_dict":
+             sccp_msg_dict = message[m3ua_key][0]            
+           else:
+             Msg = "<%s>=<%s>,hex=<%s>*" % (m3ua_key,message[m3ua_key][0],PCA_GenLib.getHexString(message[m3ua_key][1]))
+             PCA_GenLib.WriteLog(Msg,display_flags)
+             parameter_list[m3ua_key] = message[m3ua_key]
+
+        tcap_msg_dict = {}
+        for sccp_key in sorted(sccp_msg_dict):
+          if sccp_key == "SCCP tcap_msg_dict":
+            tcap_msg_dict = sccp_msg_dict[sccp_key][0]                
+          else:
+            Msg = "<%s>=<%s>,hex=<%s>*" % (sccp_key,sccp_msg_dict[sccp_key][0],PCA_GenLib.getHexString(sccp_msg_dict[sccp_key][1]))
+            PCA_GenLib.WriteLog(Msg,display_flags)
+            parameter_list[sccp_key] = sccp_msg_dict[sccp_key]
+
+
+        map_msg_dict = {}
+        for tcap_key in sorted(tcap_msg_dict):
+          if tcap_key == "TCAP map_msg_dict":
+            map_msg_dict = tcap_msg_dict[tcap_key][0]                
+          else:
+            Msg = "<%s>=<%s>,hex=<%s>*" % (tcap_key,tcap_msg_dict[tcap_key][0],PCA_GenLib.getHexString(tcap_msg_dict[tcap_key][1]))
+            PCA_GenLib.WriteLog(Msg,display_flags)
+            parameter_list[tcap_key] = tcap_msg_dict[tcap_key]
+
+        for map_key in sorted(map_msg_dict):
+          Msg = "<%s>=<%s>,hex=<%s>*" % (map_key,map_msg_dict[map_key][0],PCA_GenLib.getHexString(map_msg_dict[map_key][1]))
+          PCA_GenLib.WriteLog(Msg,display_flags)
+          parameter_list[map_key] = map_msg_dict[map_key]
+
+        Msg = "-----------------------------------------------------------------"
+        PCA_GenLib.WriteLog(Msg,2)
+        #return parameter_list
+  except:
+    Msg = "getDetailMessage error : <%s>,<%s> " % (sys.exc_type,sys.exc_value)
+    PCA_GenLib.WriteLog(Msg,0)
+    raise
+			
+#########################################################################
+### RESPONSE
+#########################################################################
+  	
+def ResponseHandler(Server,XMLCFG,parser,handler):
+  global g_response_counter
+  Msg = "ResponseHandler init "
+  PCA_GenLib.WriteLog(Msg,0)
+
+  try:
+    M3UAMessage = PCA_M3UAMessage.Writer(XMLCFG)
+    mo_fsm_message_request = {}
+    sri_sm_message_request = {}
+    mt_fsm_message_request = {}
+    mo_fsm_message_response = {}
+    sri_sm_message_response = {}
+    mt_fsm_message_response = {}
+    MSG_ID = int(random.random()*1000000)
+
+    while 1:
+      Flag = PCA_ThreadLib.GetMainTerminateFlag()
+      if Flag == "TRUE":
+        Msg = "ResponseHandler GetMainTerminateFlag = TRUE "
+        PCA_GenLib.WriteLog(Msg,1)
+        break
+      else:
+        Msg = "ResponseHandler GetMainTerminateFlag = FALSE "
+        PCA_GenLib.WriteLog(Msg,2)
+				
+      Message = Server.readDataFromSocket(Length=1024,TimeOut=3.0)
+      if Message != None:
+        SocketMessage = Message
+        Msg = "recv = length=<%s>,*\n%s\n*" % (len(SocketMessage),PCA_GenLib.HexDump(SocketMessage))
+        PCA_GenLib.WriteLog(Msg,2)
+        g_response_counter = g_response_counter + 1
+
+        parser.parse(Message)
+        parsed_message = {}
+        parsed_message = handler.getHandlerResponse()
+        ServerID = handler.getTID()
+        DebugStr = handler.getDebugStr()    
+        Msg = "DEBUG = %s" % DebugStr
+        PCA_GenLib.WriteLog(Msg,3)   
+        request_parameter_list = {}
+        getDetailMessage(parsed_message,request_parameter_list,3)
+      
+        if parsed_message['M3UA Message Class'][0] == "Transfer Messages" :
+          tcap_begin = 0
+          try:
+            request_parameter_list["TCAP tcap_begin"]
+            Msg = "recv transfer message ready to reply"
+            PCA_GenLib.WriteLog(Msg,3)
+            tcap_begin = 1
+          except:
+            Msg = "not a tcap begin message"
+            PCA_GenLib.WriteLog(Msg,2)         
+
+          
+          if tcap_begin == 1:
+            Request_opCode = None
+            try:
+              Request_opCode = request_parameter_list["MAP opCode"][0]
+            except:
+              Msg = "un-def action for this "
+              PCA_GenLib.WriteLog(Msg,1)
+              continue
+
+            if Request_opCode == "mo-ForwardSM":
+              Msg = "recv MO-FSM"
+              PCA_GenLib.WriteLog(Msg,1)
+              mo_fsm_message_request = request_parameter_list
+
+              originator = request_parameter_list["MAP Originator_address"][0]
+              recipient = request_parameter_list["MAP GSM0340 recipient address"][0]
+              sms_text = request_parameter_list["MAP sms text"][1]
+              sms_text_ascii = request_parameter_list["MAP sms text"][0]
+              MSG_ID = MSG_ID + 1
+              submit_time = int(time.time())
+              
+              msg_to_queue = {}
+              msg_to_queue['id'] = MSG_ID
+              msg_to_queue['originator'] = originator
+              msg_to_queue['recipient'] = recipient
+              msg_to_queue['submit_time'] = submit_time
+              msg_to_queue['next_retry_time'] = submit_time
+              msg_to_queue['sms_text'] = sms_text   
+              msg_to_queue['sms_text_ascii'] = sms_text_ascii              
+              msg_to_queue['originator_imsi'] = None
+              msg_to_queue['recipient_imsi'] = None
+              msg_to_queue['NNN'] = None
+
+              Msg = "QUEUE : msg to queue =<%s>, <%s>,<%s>,<%s>" % (MSG_ID,originator,recipient,sms_text_ascii)
+              PCA_GenLib.WriteLog(Msg,1)
+              
+              Message = M3UAMessage.getPayloadData("MO-FSM-Ack",mo_fsm_message_request,mo_fsm_message_request)
+              parser.parse(Message)
+              Msg = "send  =  length=<%s>,*\n%s\n*" % (len(Message),PCA_GenLib.HexDump(Message))
+              PCA_GenLib.WriteLog(Msg,2)
+              mo_fsm_message_response = {}
+              mo_fsm_message_response = handler.getHandlerResponse()
+              ServerID = handler.getTID()
+              DebugStr = handler.getDebugStr()
+              response_parameter_list = {}
+              getDetailMessage(mo_fsm_message_response,response_parameter_list,3)
+              ####################################################
+              # Send MO-FSM Ack
+              ####################################################
+             
+              Msg = "send MO-FSM ack"
+              PCA_GenLib.WriteLog(Msg,1)
+              Server.sendDataToSocket(Message)
+              Msg = "put mo-ForwardSM data to Queue"
+              PCA_GenLib.WriteLog(Msg,1)
+             
+              MSG_Queue.put(msg_to_queue)
+
+              time.sleep(0.1)
+              
+            else:
+              Msg = "undef map opcode , not action require now"
+              PCA_GenLib.WriteLog(Msg,1)
+          else:
+            Msg = "tcap end message "
+            PCA_GenLib.WriteLog(Msg,2)   
+            Response_opCode = None
+
+            try:
+              Response_opCode = request_parameter_list["MAP opCode"][0]
+            except:
+              Msg = "un-def action for this "
+              PCA_GenLib.WriteLog(Msg,1)
+              continue
+
+            Msg = "tcap end opCode = %s" % Response_opCode
+            PCA_GenLib.WriteLog(Msg,2)
+            
+            if Response_opCode == "sendRoutingInfoForSM":
+              Msg = "Process sendRoutingInfoForSM respose get NNN if exists and Create MT-FSM "
+              PCA_GenLib.WriteLog(Msg,2)
+              Msg = "recv SRI-SM ack"
+              PCA_GenLib.WriteLog(Msg,1)
+
+              #Msg = "data  = \n%s\n" % DebugStr
+              #PCA_GenLib.WriteLog(Msg,1)
+              try:
+                msg_data = SRI_Queue.get(True, 5)
+                
+                try:           
+                  imsi = request_parameter_list["MAP imsi value"][0]
+                  location_GT = request_parameter_list["MAP NNN value"][0]
+                  Msg = "SRI SM RESP imsi=<%s>,location GT=<%s>" % (imsi,location_GT)
+                  PCA_GenLib.WriteLog(Msg,1)
+                  msg_data['recipient_imsi'] = imsi
+                  msg_data['NNN'] = location_GT
+                  Msg = "put message to MT queue"
+                  PCA_GenLib.WriteLog(Msg,1)
+                  MT_Queue.put(msg_to_queue)
+                except KeyError:          
+                  Msg = "msg id = <%s>,SRI response no IMSI return , put message back to MSG queue" % msg_data['id']
+                  PCA_GenLib.WriteLog(Msg,1)
+                  retry_time = int(time.time())
+                  msg_data['next_retry_time'] = retry_time + 10
+                  MSG_Queue.put(msg_data)
+	
+              except Queue.Empty:  
+                  Msg = "warning SRI-SM resp received but SRI queue empty , message will be removed"
+                  PCA_GenLib.WriteLog(Msg,1)
+
+              #sri_sm_message_request = request_parameter_list
+
+              #Message = M3UAMessage.getPayloadData("MT-FSM",mo_fsm_message_request,sri_sm_message_request)
+              #parser.parse(Message)
+              #Msg = "send  =  length=<%s>,*\n%s\n*" % (len(Message),PCA_GenLib.HexDump(Message))
+              #PCA_GenLib.WriteLog(Msg,2)
+              #mt_fsm_message_request = {}
+             # mt_fsm_message_request = handler.getHandlerResponse()
+              #ServerID = handler.getTID()
+              #DebugStr = handler.getDebugStr()
+              #Msg = "MT-FSM data  = \n%s\n" % DebugStr
+              #PCA_GenLib.WriteLog(Msg,1)
+              #response_parameter_list = {}
+              getDetailMessage(mt_fsm_message_request,response_parameter_list,3)
+              ####################################################
+              # Send MT-FSM
+              ####################################################
+              #time.sleep(0.1)
+              #Msg = "send MT-FSM"
+              #PCA_GenLib.WriteLog(Msg,1)
+              #Server.sendDataToSocket(Message)
+            elif Response_opCode == "mt-ForwardSM":
+              Msg = "recv MT-FSM-act"
+              PCA_GenLib.WriteLog(Msg,1)
+              # TODO : check MT-FSM response , if MT-Failure , then you put msg back to MSG_Queue
+              try:           
+                  msg_data = MT_resp_Queue.get(True, 5)
+                  Msg = "msg removed id=<%s>,<%s>,<%s>,<%s>" % (msg_data['id'],msg_data['originator'],msg_data['recipient'],msg_data['sms_text_ascii'])
+                  PCA_GenLib.WriteLog(Msg,1)
+              except Queue.Empty:            
+                Msg = "warning MT-FSM resp received but MT-resp queue empty , message will be removed"
+                PCA_GenLib.WriteLog(Msg,1)	
+
+ 
+            else:
+              Msg = "undef Response opCode"
+              PCA_GenLib.WriteLog(Msg,1)
+
+        else:
+          Msg = "not a transfer message undef msg class = %s" % parsed_message['M3UA Message Class'][0]
+          PCA_GenLib.WriteLog(Msg,1)   
+
+        #Msg = "RSP = %s" % SocketMessage
+        #PCA_GenLib.WriteLog(Msg,1)   
+	   
+    Msg = "Normal End of Response Thread"
+    PCA_GenLib.WriteLog(Msg,2)
+			
+  except:
+    Msg = "ResponseHandler error : <%s>,<%s> " % (sys.exc_type,sys.exc_value)
+    PCA_GenLib.WriteLog(Msg,0)
+    Msg = "Error End of Response Thread"
+    PCA_GenLib.WriteLog(Msg,1)
+    raise
+
+							
+#########################################################################
+###  REQUEST
+###
+#########################################################################
+  	
+def RequestHandler(Server,Message):
+  global g_request_counter
+  Msg = "-----------------------------------------------------------"
+  PCA_GenLib.WriteLog(Msg,2)
+  #Msg = "send = *\n%s\n*" % PCA_GenLib.HexDump(Message)
+  #PCA_GenLib.WriteLog(Msg,0)
+  start_time = time.time()
+  
+  DebugStr = Message
+  Msg = "REQ = %s" % DebugStr
+  PCA_GenLib.WriteLog(Msg,0)   
+  Server.sendDataToSocket(Message)
+	
+  g_request_counter = g_request_counter + 1
+	
+		
+######################################################################	
+#	
+######################################################################	
+def MAPClient(XMLCFG):
+  global g_request_counter
+  global g_response_counter
+  	
+  NumberOfRequest = 100
+  try:
+    print 'Start Program ...'
+    try:
+      PCA_GenLib.DBXMLCFGInit(XMLCFG)			
+      Server = PCA_M3UAClientSocket.Connector(XMLCFG)
+      try:	
+				        			
+        Server.connect()
+        parser = PCA_M3UAParser.Parser()
+        handler = PCA_M3UAParser.Handler()
+        parser.setContentHandler(handler)
+ 
+      
+        thread.start_new(ResponseHandler,(Server,XMLCFG,parser,handler,))
+
+        #a_party = "886935000001"
+        #b_party = "886936453016"
+       				
+        #Msg = "sleep 3 seconds before send request"
+        #PCA_GenLib.WriteLog(Msg,1)
+        #time.sleep(3)
+        Msg = "-----------------------------------------------------------"
+        PCA_GenLib.WriteLog(Msg,2)
+        M3UAMessage = PCA_M3UAMessage.Writer(XMLCFG)
+				
+        #NumberOfRequest = 1
+        #for i in range(NumberOfRequest):
+        #  TID = random.randint(200000,99999999)
+        #  TID = TID + 1
+        #  Message = "data %s" % TID	
+
+        #  Msg = "calling RequestHandler"
+        #  PCA_GenLib.WriteLog(Msg,9)
+        #  RequestHandler(Server,Message)
+        #  time.sleep(1)
+				
+        #  Msg = "check response"
+        #  PCA_GenLib.WriteLog(Msg,5)
+        #  Msg = "-----------------------------------------------------------"
+        #  PCA_GenLib.WriteLog(Msg,5)
+        request_parameter_list = {}
+        location_GT = "na"
+        mo_fsm_message_request = {}
+	while (1):
+
+          try:
+           
+            msg_data = MSG_Queue.get(True, 5)
+            Msg = "main thread msg queue we got data "
+            PCA_GenLib.WriteLog(Msg,2)	
+            current_time = int(time.time())
+            if msg_data['next_retry_time'] < current_time:
+               Msg = "time % > %s : msg should wait for next retry" % (msg_data['next_retry_time'] , current_time)
+               PCA_GenLib.WriteLog(Msg,2)
+               Msg = "msg id=<%s>,<%s>,<%s>,<%s>" % (msg_data['id'],msg_data['originator'],msg_data['recipient'],msg_data['sms_text_ascii'])
+               MSG_Queue.put(msg_data)
+               continue
+            
+            # Message location GT not request or no received
+            if msg_data['NNN'] == None:
+               #mo_fsm_message_request = data 
+               ####################################################
+               # Construct SRI-SM request
+               ####################################################
+               Msg = "we got stored MO-FSM message , send SRI-SM "
+               PCA_GenLib.WriteLog(Msg,2)
+               
+               Message = M3UAMessage.getPayloadData("SRI-SM",msg_data,msg_data)
+               parser.parse(Message)
+               Msg = "send  = SRI_SM length=<%s>,*\n%s\n*" % (len(Message),PCA_GenLib.HexDump(Message))
+               PCA_GenLib.WriteLog(Msg,3)
+               mo_fsm_message_response = {}
+               mo_fsm_message_response = handler.getHandlerResponse()
+               ServerID = handler.getTID()
+               DebugStr = handler.getDebugStr()
+               Msg = "send : %s*" % DebugStr
+               PCA_GenLib.WriteLog(Msg,3)
+               response_parameter_list = {}
+               getDetailMessage(mo_fsm_message_response,response_parameter_list,5)
+               ####################################################
+               # Send SRI-SM
+               ####################################################
+               SRI_Queue.put(msg_data)
+               time.sleep(0.1)
+               Msg = "send SRI-SM"
+               PCA_GenLib.WriteLog(Msg,1)
+               Server.sendDataToSocket(Message)
+               
+            
+          except Queue.Empty:            
+            Msg = "main thread MSG queue is empty"
+            PCA_GenLib.WriteLog(Msg,2)	
+
+          ######################################################################################
+      
+          try:
+           
+            msg_data = MT_Queue.get(True, 5)
+            Msg = "main thread MT queue we got data "
+            PCA_GenLib.WriteLog(Msg,2)	
+            
+            # Message location GT not request or no received
+            if msg_data['NNN'] != None:               
+               ####################################################
+               # Construct MT request
+               ####################################################
+               Msg = "we got SRI-SM postive response "
+               PCA_GenLib.WriteLog(Msg,1)
+             
+               Message = M3UAMessage.getPayloadData("MT-FSM",msg_data,msg_data)
+               parser.parse(Message)
+               Msg = "send  = MT-FSM length=<%s>,*\n%s\n*" % (len(Message),PCA_GenLib.HexDump(Message))
+               PCA_GenLib.WriteLog(Msg,3)
+               mo_fsm_message_response = {}
+               mo_fsm_message_response = handler.getHandlerResponse()
+               ServerID = handler.getTID()
+               DebugStr = handler.getDebugStr()
+               Msg = "send : %s*" % DebugStr
+               PCA_GenLib.WriteLog(Msg,3)
+               response_parameter_list = {}
+               getDetailMessage(mo_fsm_message_response,response_parameter_list,5)
+               ####################################################
+               # Send MT-FSM
+               ####################################################
+               MT_resp_Queue.put(msg_data)
+               time.sleep(0.1)
+               Msg = "send MT-SM"
+               PCA_GenLib.WriteLog(Msg,1)
+               Server.sendDataToSocket(Message)
+               
+              
+            
+          except Queue.Empty:            
+            Msg = "main thread MT queue is empty"
+            PCA_GenLib.WriteLog(Msg,2)	
+
+        
+        Msg = "Normal end of MAPClient"
+        PCA_GenLib.WriteLog(Msg,9)
+      finally:
+        Msg = "SetMainTerminateFlag = TRUE"
+        PCA_GenLib.WriteLog(Msg,1)
+        PCA_ThreadLib.SetMainTerminateFlag("TRUE")
+        Msg = "-----------------------------------------------------------"
+        PCA_GenLib.WriteLog(Msg,1)
+        time.sleep(2)
+        Server.Close()
+				
+				
+        Msg = "Number of Request send = <%s> , Number Of Response recv = <%s>" % (g_request_counter,g_response_counter )
+        PCA_GenLib.WriteLog(Msg,1)
+				
+        #for ID in g_SocketBuffer.keys():
+        #  (start_time,ClientRequestMessage) = g_SocketBuffer[ID]
+        #  Msg = "No Response TID = <%s>,start_time=<%s>" % (ID,start_time)
+        #  PCA_GenLib.WriteLog(Msg,1)
+    finally:
+      PCA_GenLib.CloseLog()
+
+  except:
+    print '\n\n uncaught ! < ',sys.exc_type,sys.exc_value,' >'
+    import traceback
+    traceback.print_exc()  
+    raise
+
+#################################################################
+#   Main 
+#################################################################
+	
+if __name__ == '__main__':   	
+  try:	
+  	print "Open cfg file"
+	XMLCFG =  open("SMSC_simulator.cfg","r").read()
+	MAPClient(XMLCFG)
+  except:
+  	print "Error or .cfg configuration file not found"
+ 	print "Msg = : <%s>,<%s>" % (sys.exc_type,sys.exc_value)
+ 	import traceback
+	traceback.print_exc()  	
+  	sys.exit()
