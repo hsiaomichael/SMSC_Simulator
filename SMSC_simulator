@@ -24,6 +24,10 @@
 # Date      : 2016/10/18
 # Desc      : Act as SMSC
 
+# Update    : Michael Hsiao #
+# Date      : 2016/10/30
+# Desc      : First Released
+
 ########################################################################################
 import sys,time,os,socket,thread,Queue,random
 import random,string,struct
