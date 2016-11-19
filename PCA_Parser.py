@@ -20,6 +20,7 @@ import PCA_GenLib,struct
 class ContentHandler:
     DebugStr = "NA"
     TID = "NA"
+    Message = None
     def __init__(self):
         self._locator = None
 
@@ -69,6 +70,9 @@ class ContentHandler:
         
     def getTID(self):
         return self.TID
+    def getHandlerResponse(self):
+        return self.Message
+
 #########################################################################
 # 
 #

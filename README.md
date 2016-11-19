@@ -3,9 +3,11 @@ SMSC Simulator
 ========================
 Native SS7 stack
 Sigtran Support :  encode/decode (M3UA|SCCP|TCAP|MAP|GSM 0340) protocol
-Receive MO , send SRI and MT to STP 
+Support SMPP protocol (bind_transmitter|submit_sm)
 
-TODO : Support SMPP protocol (bind_transmitter|submit_sm)
+Receive MO , send SRI and MT to STP 
+Receive SMPP submit_sm , send SRI and MT to STP 
+
 
 
 Pre-Request

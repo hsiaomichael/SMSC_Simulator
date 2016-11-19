@@ -28,6 +28,10 @@
 # Date      : 2016/10/30
 # Desc      : First Released
 
+# Update    : Michael Hsiao #
+# Date      : 2016/11/19
+# Desc      : Add SMPP Server support
+
 ########################################################################################
 import sys,time,os,socket,thread,Queue,random
 import random,string,struct
@@ -38,6 +42,7 @@ import PCA_XMLParser
 import PCA_M3UAClientSocket
 import PCA_M3UAParser
 import PCA_M3UAMessage
+import PCA_SMPPServerSocket
 
 ResponseMutex = thread.allocate_lock()
 g_SocketBuffer = {}
@@ -256,7 +261,8 @@ def ResponseHandler(Server,XMLCFG,parser,handler):
                   msg_data['NNN'] = location_GT
                   Msg = "put message to MT queue"
                   PCA_GenLib.WriteLog(Msg,1)
-                  MT_Queue.put(msg_to_queue)
+                  #MT_Queue.put(msg_to_queue)
+                  MT_Queue.put(msg_data)
                 except KeyError:          
                   Msg = "msg id = <%s>,SRI response no IMSI return , put message back to MSG queue" % msg_data['id']
                   PCA_GenLib.WriteLog(Msg,1)
@@ -280,7 +286,7 @@ def ResponseHandler(Server,XMLCFG,parser,handler):
               #DebugStr = handler.getDebugStr()
               #Msg = "MT-FSM data  = \n%s\n" % DebugStr
               #PCA_GenLib.WriteLog(Msg,1)
-              #response_parameter_list = {}
+              response_parameter_list = {}
               getDetailMessage(mt_fsm_message_request,response_parameter_list,3)
               ####################################################
               # Send MT-FSM
@@ -356,8 +362,10 @@ def MAPClient(XMLCFG):
   try:
     print 'Start Program ...'
     try:
+      TimeOut = 2.0
       PCA_GenLib.DBXMLCFGInit(XMLCFG)			
       Server = PCA_M3UAClientSocket.Connector(XMLCFG)
+      SMPPServer = PCA_SMPPServerSocket.Acceptor(XMLCFG)
       try:	
 				        			
         Server.connect()
@@ -367,6 +375,8 @@ def MAPClient(XMLCFG):
  
       
         thread.start_new(ResponseHandler,(Server,XMLCFG,parser,handler,))
+        thread.start_new(SMPPServer.dispatcher,(TimeOut,MSG_Queue,))
+        #                        SMPPServer.dispatcher(TimeOut)
 
         #a_party = "886935000001"
         #b_party = "886936453016"
@@ -404,12 +414,13 @@ def MAPClient(XMLCFG):
             Msg = "main thread msg queue we got data "
             PCA_GenLib.WriteLog(Msg,2)	
             current_time = int(time.time())
-            if msg_data['next_retry_time'] < current_time:
-               Msg = "time % > %s : msg should wait for next retry" % (msg_data['next_retry_time'] , current_time)
-               PCA_GenLib.WriteLog(Msg,2)
-               Msg = "msg id=<%s>,<%s>,<%s>,<%s>" % (msg_data['id'],msg_data['originator'],msg_data['recipient'],msg_data['sms_text_ascii'])
-               MSG_Queue.put(msg_data)
-               continue
+            #if msg_data['next_retry_time'] < current_time:
+            #   Msg = "time %s < %s : msg should wait for next retry" % (msg_data['next_retry_time'] , current_time)
+            #   PCA_GenLib.WriteLog(Msg,1)
+            #   Msg = "remove msg id=<%s>,<%s>,<%s>,<%s>" % (msg_data['id'],msg_data['originator'],msg_data['recipient'],msg_data['sms_text_ascii'])
+            #   PCA_GenLib.WriteLog(Msg,1)
+               #MSG_Queue.put(msg_data)
+            #    continue
             
             # Message location GT not request or no received
             if msg_data['NNN'] == None:
@@ -500,6 +511,7 @@ def MAPClient(XMLCFG):
         PCA_GenLib.WriteLog(Msg,1)
         time.sleep(2)
         Server.Close()
+        SMPPServer.close()
 				
 				
         Msg = "Number of Request send = <%s> , Number Of Response recv = <%s>" % (g_request_counter,g_response_counter )
